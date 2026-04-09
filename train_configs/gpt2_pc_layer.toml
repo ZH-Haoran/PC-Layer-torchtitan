@@ -1,0 +1,87 @@
+# torchtitan GPT-2 Config.toml
+# Configuration for training GPT-2 style models
+
+[job]
+dump_folder = "./outputs"
+workspace = "pc_layer"
+description = "pc_gpt2_training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_color_printing = true
+enable_wandb = true
+wandb_comment = "test"
+
+[model]
+name = "gpt2"
+flavor = "350M"
+norm_type = "layernorm"  # GPT uses layernorm
+tokenizer_path = "./tokenizer.model"
+
+# PC Layer configuration
+precondition_mlp = true
+precondition_o = true
+precondition_qk = false
+precondition_v = false
+power_iter = 5
+pc_norm_type = "modified_F"
+pc_norm_eps = 1e-7
+pc_level = 4
+
+recover_w_norm = false
+scale_constant = 1.0
+learnable_gamma = true
+gamma_init_value = 1.0
+
+log_signal_propagation = true
+log_gradients = true
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+muon_lr_adjust = "moonlight"  # moonlight # spectral_mup
+
+[training]
+batch_size = 1
+seq_len = 8192
+max_norm = 1.0
+data_parallel_degree = -1
+tensor_parallel_degree = 1
+fp8_linear = ""
+compile = false
+dataset = "fineweb"
+dataset_train_path = "/data_hss/fineweb/sample/350BT_tokenized/train"
+dataset_val_path = "/data_hss/fineweb/sample/350BT_tokenized/val"
+grad_accumulation_steps = 1
+
+warmup_steps = 220
+steps = 22000
+val_interval = 500
+num_val_batch = 32
+
+lr_scheduler_type = "cosine" #"wsd" #"linear_warmup_linear_decay"  #linear_warmup_cosine_decay
+cosine_end_ratio = 0.1
+
+[experimental]
+pipeline_parallel_degree = 1
+
+[checkpoint]
+resume = false
+enable_checkpoint = false
+folder = "/data_hss/checkpoints/gpt_pc_layer_cosine"
+interval_type = "steps"
+interval = 2000
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = 'none'
+selective_ac_option = 'op'

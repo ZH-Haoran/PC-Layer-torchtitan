@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info
+build/
+dist/
+
+# IDE
+.idea/
+.DS_Store
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & caches
+data/
+.hf_datasets_cache/
+.hf_hub_cache/
+
+# Logs & experiment tracking
+outputs/
+wandb/
+swanlab/
+swanlog/
+
+# Evaluation
+lm_eval_results/
+lm-evaluation-harness/
+
+# Visualization outputs
+visualization_output/
+visualize/scripts/
+figures/
+
+# Experiment result data
+files/
+
+# Model binaries
+tokenizer.model
+*.bin
+*.safetensors
+
+# Checkpoints
+checkpoints/
+
+# Run scripts
+run_gpt2_pc_layer.sh
+run_llama_2_pc_layer.sh
+run_lm_eval.sh
+
+# Temporary files
+temp.py
+torchtitan/temp.sh
+train_configs/tmp/
+train_configs/pc_grid_search/
+pc_grid_search_scripts/
+run_pc_exp_*.sh
+
+# Claude Code local settings
+.claude/
+
+# Tokenizer models
+torchtitan/datasets/**/*.model
+
+# Misc temp files
+*.log
+error.json
+_remote_module_non_scriptable.py
+out/

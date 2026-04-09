@@ -1,0 +1,95 @@
+# torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+
+[job]
+dump_folder = "./outputs"
+workspace = "pc_layer"
+description = "ttt"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_color_printing = true
+enable_wandb = true
+wandb_comment = "ttt"      # ! CHOOSE PROPER NAME
+
+[model]
+name = "llama2"
+flavor = "271M" #"271M" #"35M" "39M" #1B 271M 162M 134M 102M 67M 60M 39M
+norm_type = "fused_rmsnorm"  #[layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
+tokenizer_path ="./tokenizer.model"
+# for baseline ,set 5 pre* to be false
+# for pc_layer, set pre* to be true except precondition_qk and precondition_feature_matrix
+precondition_mlp = true
+precondition_o = true
+precondition_qk = false
+precondition_v = false
+power_iter = 1
+pc_norm_type = 'op'
+pc_op_beta = 1.0
+pc_norm_eps = 1e-7
+pc_level = 4
+recover_w_norm = true       # whether multiplying back W norm
+scale_constant = 1.0        # whether multiplying a scaling constant
+learnable_gamma = true      # whether multiplying a learnable scaler gamma
+gamma_init_value = 1.0      # gamma initial value
+
+log_signal_propagation = true
+log_gradients = true
+
+[optimizer]
+name = "AdamW" # "AdamW" #"adam_mini" # 'muon'
+lr = 8.485e-4
+# Muon #2.121e-3 #1.5e-3 #1.061e-3 #3e-3 #4.243e-3 #6e-3 #8.485e-3
+# AdamW #4.243e-4 #6e-4 #3e-4 #8.485e-4 #1.2e-3
+
+muon_lr_adjust = "moonlight"  # moonlight # spectral_mup
+muon_coefficient_type = "simple"  # simple # quintic # polar_express # aol
+ns_steps = 5  # Newton-Schulz iteration steps: #### SENMIAO NOTE!!!: simple/quintic = 5; polar_express = 8; aol 我copy的，先不管 ###
+use_bf16 = true  # 控制是否在 Newton-Schulz 迭代中使用 bf16
+
+[training]
+batch_size = 5 #64 # 64 , assume 2 gpu, total_bs =batch_size * 2 * grad_accumulation_steps
+seq_len = 8192
+max_norm = 1.0  # grad norm clipping
+data_parallel_degree = -1
+tensor_parallel_degree = 1
+fp8_linear = ""
+compile = false
+dataset = "fineweb"
+dataset_train_path = "/data_hss/fineweb/sample/350BT_tokenized/train"
+dataset_val_path = "/data_hss/fineweb/sample/350BT_tokenized/val"
+grad_accumulation_steps = 8 #2 # total_bs = grad_accumulation_steps * batch_size * num_gpus
+
+warmup_steps = 220 #268 #204 #134 #120 #78 #2000  # lr scheduler warm up, use 1% total steps
+steps = 22000  #4000 #26800 #20400 #13400 #12000 #7800 # 200000 
+val_interval = 500
+num_val_batch = 32 # 0 means run through the entire val set
+
+lr_scheduler_type = "cosine" #"wsd" #"linear_warmup_linear_decay"  #linear_warmup_cosine_decay
+cosine_end_ratio = 0.1
+
+
+[experimental]
+pipeline_parallel_degree = 1
+
+[checkpoint]
+resume = false
+enable_checkpoint = false
+folder = "/data_hss/checkpoints/llama2_pc_layer_cosine" #"checkpoint"
+interval_type = "steps"
+interval = 2000
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = 'none'  # ['none', 'selective', 'full'] # for Adam-mini we can use none, will be faster
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
