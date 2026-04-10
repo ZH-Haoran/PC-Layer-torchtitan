@@ -6,148 +6,6 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.distributed._tensor import Replicate
 
-import triton
-import triton.language as tl
-
-
-# ── Triton kernels ───────────────────────────────────────────────────
-
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4),
-        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8),
-        triton.Config({"BLOCK_SIZE": 4096}, num_warps=16),
-    ],
-    key=["n_elements"],
-)
-@triton.jit
-def _add_scaled_identity_kernel(
-    M_ptr,
-    Out_ptr,
-    alpha,
-    beta,
-    N,          # matrix side length (N×N)
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    m = tl.load(M_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-
-    row = offsets // N
-    col = offsets % N
-    diag = tl.where(row == col, alpha, 0.0)
-
-    result = diag + beta * m
-
-    tl.store(Out_ptr + offsets, result, mask=mask)
-
-
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4),
-        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8),
-        triton.Config({"BLOCK_SIZE": 4096}, num_warps=16),
-    ],
-    key=["n_elements"],
-)
-@triton.jit
-def _axpby_kernel(
-    A_ptr,
-    B_ptr,
-    Out_ptr,
-    alpha,
-    beta,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    a = tl.load(A_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-    b = tl.load(B_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-
-    result = alpha * a + beta * b
-
-    tl.store(Out_ptr + offsets, result, mask=mask)
-
-
-# ── Autograd wrappers ────────────────────────────────────────────────
-
-class _AddScaledIdentityOp(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, M, alpha, beta):
-        assert M.ndim == 2 and M.shape[0] == M.shape[1]
-        M = M.contiguous()
-        N = M.shape[0]
-        n_elements = N * N
-        out = torch.empty_like(M)
-
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        _add_scaled_identity_kernel[grid](
-            M, out,
-            float(alpha), float(beta),
-            N, n_elements,
-        )
-
-        ctx.beta = beta
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output * ctx.beta, None, None
-
-
-class _AxpbyOp(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, A, B, alpha, beta):
-        A = A.contiguous()
-        B = B.contiguous()
-        n_elements = A.numel()
-        out = torch.empty_like(A)
-
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        _axpby_kernel[grid](
-            A, B, out,
-            float(alpha), float(beta),
-            n_elements,
-        )
-
-        ctx.alpha = alpha
-        ctx.beta = beta
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output * ctx.alpha, grad_output * ctx.beta, None, None
-
-
-# ── Fused helper functions ───────────────────────────────────────────
-
-def fused_add_scaled_identity(M, alpha, beta):
-    """Compute alpha*I + beta*M for a square matrix.
-    Falls back to torch ops for DTensor inputs.
-    """
-    if isinstance(M, DTensor):
-        N = M.shape[0]
-        I = torch.eye(N, device=M.device, dtype=M.dtype)
-        return alpha * I + beta * M
-    return _AddScaledIdentityOp.apply(M, alpha, beta)
-
-
-def fused_axpby(A, B, alpha, beta):
-    """Compute alpha*A + beta*B for same-shape tensors.
-    Falls back to torch ops for DTensor inputs.
-    """
-    if isinstance(A, DTensor) or isinstance(B, DTensor):
-        return alpha * A + beta * B
-    return _AxpbyOp.apply(A, B, alpha, beta)
-
-
-# ── Constants ────────────────────────────────────────────────────────
 
 _POLAR_EXPRESS_COEFFS = [
     (7.2086, -15.5131, 9.0178),
@@ -159,6 +17,28 @@ _POLAR_EXPRESS_COEFFS = [
     (2.1715, -1.5246, 0.3885),
     (1.8648, -1.2224, 0.3577),
 ]
+
+
+_HORNER_COEFFS = {
+    1: [(-0.507, 1.507)],
+    2: [(0.560, -1.643), (1.0, 2.083)],
+    3: [(-1.283, 4.023), (1.0, -4.649), (1.0, 2.909)],
+    4: [(2.890, -10.351), (1.0, 14.097), (1.0, -9.261), (1.0, 3.625)],
+}
+
+
+def _horner_poly(gram, eye, coeffs):
+    """Evaluate a matrix polynomial in Horner form.
+
+    *coeffs* is a list of (beta, alpha) pairs from innermost to outermost.
+    The first step uses scalar arithmetic; subsequent steps fuse the GEMM
+    and the alpha*I addition into a single ``torch.addmm`` call.
+    """
+    beta_0, alpha_0 = coeffs[0]
+    S = alpha_0 * eye + beta_0 * gram
+    for beta_k, alpha_k in coeffs[1:]:
+        S = torch.addmm(eye, gram, S, beta=alpha_k, alpha=beta_k)
+    return S
 
 
 class LearnableGamma(nn.Module):
@@ -234,7 +114,20 @@ class PCTransform(nn.Module):
                 )
             W_norm = torch.tensor(1.0, dtype=weight.dtype, device=weight.device)
         elif model_config.pc_norm_type == "F":
-            W_norm = weight.norm() + model_config.pc_norm_eps
+            if isinstance(weight, DTensor):
+                if all(isinstance(p, Replicate) for p in weight.placements):
+                    w_local = weight.to_local()
+                else:
+                    w_local = weight.full_tensor()
+                W_norm_local = w_local.norm() + model_config.pc_norm_eps
+                W_norm = DTensor.from_local(
+                    W_norm_local,
+                    device_mesh=weight.device_mesh,
+                    placements=[Replicate()],
+                    run_check=False,
+                )
+            else:
+                W_norm = weight.norm() + model_config.pc_norm_eps
 
         elif model_config.pc_norm_type == "modified_F":
             if r <= c:
@@ -267,41 +160,20 @@ class PCTransform(nn.Module):
         if pc_level == 0:
             return weight
 
-        wtw = gram if gram is not None else weight.t().mm(weight)
+        gram = gram if gram is not None else weight.t().mm(weight)
+        N = gram.shape[0]
 
-        if pc_level == 1:
-            T = fused_add_scaled_identity(wtw, 1.507, -0.507)
-            weight = weight.mm(T)
-        elif pc_level == 2:
-            T = fused_add_scaled_identity(wtw, -1.643, 0.560)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, 2.083, 1.0)
-            weight = weight.mm(T)
-        elif pc_level == 3:
-            T = fused_add_scaled_identity(wtw, 4.023, -1.283)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, -4.649, 1.0)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, 2.909, 1.0)
-            weight = weight.mm(T)
-        elif pc_level == 4:
-            T = fused_add_scaled_identity(wtw, -10.351, 2.890)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, 14.097, 1.0)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, -9.261, 1.0)
-            T = wtw.mm(T)
-            T = fused_add_scaled_identity(T, 3.625, 1.0)
+        if pc_level in _HORNER_COEFFS:
+            eye = torch.eye(N, device=gram.device, dtype=gram.dtype)
+            T = _horner_poly(gram, eye, _HORNER_COEFFS[pc_level])
             weight = weight.mm(T)
         elif pc_level == 5:
-            # Polar express iterative Newton-Schulz (tall: apply from right)
             for i, (a, b, c_coeff) in enumerate(_POLAR_EXPRESS_COEFFS):
                 if i > 0:
-                    wtw = weight.t().mm(weight)
-                wtw2 = wtw.mm(wtw)
-                T = fused_axpby(wtw, wtw2, b, c_coeff)
+                    gram = weight.t().mm(weight)
+                T = torch.addmm(gram, gram, gram, beta=b, alpha=c_coeff)
                 WT = weight.mm(T)
-                weight = fused_axpby(weight, WT, a, 1.0)
+                weight = torch.add(WT, weight, alpha=a)
         else:
             raise ValueError("No pre-conditioner provided")
         return weight
@@ -311,45 +183,24 @@ class PCTransform(nn.Module):
         if pc_level == 0:
             return weight
 
-        wwt = gram if gram is not None else weight.mm(weight.t())
+        gram = gram if gram is not None else weight.mm(weight.t())
+        N = gram.shape[0]
 
-        if pc_level == 1:
-            T = fused_add_scaled_identity(wwt, 1.507, -0.507)
-            weight = T.mm(weight)
-        elif pc_level == 2:
-            T = fused_add_scaled_identity(wwt, -1.643, 0.560)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, 2.083, 1.0)
-            weight = T.mm(weight)
-        elif pc_level == 3:
-            T = fused_add_scaled_identity(wwt, 4.023, -1.283)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, -4.649, 1.0)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, 2.909, 1.0)
-            weight = T.mm(weight)
-        elif pc_level == 4:
-            T = fused_add_scaled_identity(wwt, -10.351, 2.890)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, 14.097, 1.0)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, -9.261, 1.0)
-            T = wwt.mm(T)
-            T = fused_add_scaled_identity(T, 3.625, 1.0)
+        if pc_level in _HORNER_COEFFS:
+            eye = torch.eye(N, device=gram.device, dtype=gram.dtype)
+            T = _horner_poly(gram, eye, _HORNER_COEFFS[pc_level])
             weight = T.mm(weight)
         elif pc_level == 5:
-            # Polar express iterative Newton-Schulz (wide: apply from left)
             for i, (a, b, c_coeff) in enumerate(_POLAR_EXPRESS_COEFFS):
                 if i > 0:
-                    wwt = weight.mm(weight.t())
-                wwt2 = wwt.mm(wwt)
-                T = fused_axpby(wwt, wwt2, b, c_coeff)
+                    gram = weight.mm(weight.t())
+                T = torch.addmm(gram, gram, gram, beta=b, alpha=c_coeff)
                 TW = T.mm(weight)
-                weight = fused_axpby(weight, TW, a, 1.0)
+                weight = torch.add(TW, weight, alpha=a)
         else:
             raise ValueError("No pre-conditioner provided")
         return weight
-    
+
 
 class PCLinear(nn.Module):
     def __init__(self, linear: nn.Linear, model_args, layer_id: int):
@@ -368,7 +219,6 @@ class PCLinear(nn.Module):
         else:
             self.gamma = None
 
-        # 保险：避免 meta 参数在 __init__ 时没法 fill_
         self._gamma_inited_after_materialize = False
 
     @torch.no_grad()
@@ -379,8 +229,6 @@ class PCLinear(nn.Module):
         if v is not None and (not v.is_meta):
             self.gamma.reset_parameters(self.model_args.gamma_init_value)
             self._gamma_inited_after_materialize = True
-
-    # ── OP norm helpers ────────────────────────────────────────────────
 
     def _uses_op_norm(self):
         return self.model_args.pc_norm_type == "op"
@@ -430,10 +278,6 @@ class PCLinear(nn.Module):
         return self._normalize_vector(vec)
 
     def _has_valid_op_state(self, weight):
-        # dtype is intentionally excluded: op_u/op_v are stored in the update
-        # dtype (e.g. float32) but forward may see a cast weight (e.g. bfloat16
-        # from FSDP mixed-precision).  Casting happens lazily in
-        # _compute_op_norm_from_state.
         if (
             self.op_u.numel() != weight.size(0)
             or self.op_v.numel() != weight.size(1)
@@ -441,9 +285,6 @@ class PCLinear(nn.Module):
             or self.op_v.device != weight.device
         ):
             return False
-        # After meta-device materialization, buffers may contain garbage
-        # (NaN/Inf/zero). Detect this so _initialize_op_state_if_needed
-        # properly reinitializes them.
         if (
             not torch.isfinite(self.op_u).all()
             or not torch.isfinite(self.op_v).all()
@@ -489,15 +330,11 @@ class PCLinear(nn.Module):
     def _compute_op_norm_from_state(self, weight):
         op_weight = self._get_weight_for_op(weight)
         self._ensure_op_state(op_weight)
-        # Cast op_u/op_v to match the forward weight dtype (e.g. bfloat16 under
-        # FSDP mixed precision) so torch.mv/dot don't error on dtype mismatch.
         op_u = self.op_u.to(dtype=op_weight.dtype)
         op_v = self.op_v.to(dtype=op_weight.dtype)
         wv = torch.mv(op_weight, op_v)
         W_norm_local = torch.dot(op_u, wv) + self.model_args.pc_norm_eps
         return self._wrap_scalar_like_weight(W_norm_local, weight)
-
-    # ── forward ───────────────────────────────────────────────────────
 
     def forward(self, x):
         self._maybe_init_gamma()
@@ -517,8 +354,6 @@ class PCLinear(nn.Module):
     def bias(self):
         return self.linear.bias
 
-
-# ── Module-level utilities ────────────────────────────────────────────
 
 def iter_pc_linear_modules(module):
     for submodule in module.modules():

@@ -1,9 +1,9 @@
 """
-Correctness test for fused Triton PC layer operators.
+Correctness test for optimized PC layer operators.
 
-Compares the new fused implementation (Triton kernels) against a pure-torch
-reference for all pc_levels (0-5), both tall and wide matrices, and both
-F and op norm types. Checks forward values and backward gradients.
+Compares the optimized implementation (addmm-fused Horner polynomial) against
+a pure-torch reference for all pc_levels (0-5), both tall and wide matrices,
+and both F and op norm types. Checks forward values and backward gradients.
 """
 
 import pytest
@@ -11,8 +11,6 @@ import torch
 from dataclasses import dataclass
 from typing import Optional
 
-
-# ── Reference implementation (pure torch, no Triton) ─────────────────
 
 _POLAR_EXPRESS_COEFFS = [
     (7.2086, -15.5131, 9.0178),
@@ -72,7 +70,6 @@ def _ref_preconditionerwide(weight, pc_level, gram=None):
 
 def _ref_apply_preconditioner(weight, pc_level, norm_type, norm_eps, scale_constant,
                                recover_w_norm, gamma, op_norm):
-    # normalize
     if norm_type == "F":
         W_norm = weight.norm() + norm_eps
     elif norm_type == "op":
@@ -81,14 +78,12 @@ def _ref_apply_preconditioner(weight, pc_level, norm_type, norm_eps, scale_const
         raise ValueError(f"Unsupported norm_type: {norm_type}")
     W_hat = weight / W_norm
 
-    # precondition
     r, c = W_hat.shape
     if r >= c:
         W_pc = _ref_preconditionertall(W_hat, pc_level)
     else:
         W_pc = _ref_preconditionerwide(W_hat, pc_level)
 
-    # post-scale
     W_pc = W_pc * scale_constant
     if recover_w_norm:
         W_pc = W_pc * W_norm.detach()
@@ -97,8 +92,6 @@ def _ref_apply_preconditioner(weight, pc_level, norm_type, norm_eps, scale_const
 
     return W_pc
 
-
-# ── Minimal config dataclass for PCTransform ─────────────────────────
 
 @dataclass
 class _TestConfig:
@@ -113,23 +106,19 @@ class _TestConfig:
     power_iter: int = 5
 
 
-# ── Import fused implementation ──────────────────────────────────────
+from torchtitan.pc_layer.pc_layer import PCTransform, _horner_poly, _HORNER_COEFFS
 
-from torchtitan.pc_layer.pc_layer import PCTransform
-
-
-# ── Tests ────────────────────────────────────────────────────────────
 
 def _make_weight(r, c, device="cuda", dtype=torch.float32):
     W = torch.randn(r, c, device=device, dtype=dtype)
-    W = W / W.norm()  # normalize so polynomial doesn't blow up
+    W = W / W.norm()
     return W
 
 
 @pytest.mark.parametrize("pc_level", [0, 1, 2, 3, 4, 5])
 @pytest.mark.parametrize("shape", [(64, 32), (32, 64), (48, 48)])
 def test_forward_F_norm(pc_level, shape):
-    """Forward values match between fused and reference (Frobenius norm)."""
+    """Forward values match between optimized and reference (Frobenius norm)."""
     torch.manual_seed(42)
     r, c = shape
     W = _make_weight(r, c)
@@ -150,11 +139,10 @@ def test_forward_F_norm(pc_level, shape):
 @pytest.mark.parametrize("pc_level", [0, 1, 2, 3, 4, 5])
 @pytest.mark.parametrize("shape", [(64, 32), (32, 64)])
 def test_forward_op_norm(pc_level, shape):
-    """Forward values match between fused and reference (operator norm)."""
+    """Forward values match between optimized and reference (operator norm)."""
     torch.manual_seed(42)
     r, c = shape
     W = _make_weight(r, c)
-    # Simulate precomputed op_norm
     op_norm = torch.linalg.matrix_norm(W, ord=2) + 1e-7
 
     cfg = _TestConfig(pc_level=pc_level, pc_norm_type="op",
@@ -173,7 +161,7 @@ def test_forward_op_norm(pc_level, shape):
 @pytest.mark.parametrize("pc_level", [1, 3, 5])
 @pytest.mark.parametrize("shape", [(64, 32), (32, 64)])
 def test_backward_grad_weight(pc_level, shape):
-    """Gradient w.r.t. weight matches between fused and reference."""
+    """Gradient w.r.t. weight matches between optimized and reference."""
     torch.manual_seed(42)
     r, c = shape
     W_data = _make_weight(r, c)
@@ -181,7 +169,6 @@ def test_backward_grad_weight(pc_level, shape):
     cfg = _TestConfig(pc_level=pc_level, pc_norm_type="F",
                       recover_w_norm=True, learnable_gamma=False)
 
-    # Reference gradient
     W_ref = W_data.clone().requires_grad_(True)
     out_ref = _ref_apply_preconditioner(W_ref, pc_level, "F", cfg.pc_norm_eps,
                                          cfg.scale_constant, True, None, None)
@@ -189,7 +176,6 @@ def test_backward_grad_weight(pc_level, shape):
     loss_ref.backward()
     grad_ref = W_ref.grad.clone()
 
-    # Fused gradient
     W_fused = W_data.clone().requires_grad_(True)
     pc = PCTransform(cfg)
     out_fused = pc(W_fused)
@@ -202,7 +188,7 @@ def test_backward_grad_weight(pc_level, shape):
 
 @pytest.mark.parametrize("pc_level", [1, 4])
 def test_backward_grad_gamma(pc_level):
-    """Gradient w.r.t. learnable gamma matches between fused and reference."""
+    """Gradient w.r.t. learnable gamma matches between optimized and reference."""
     torch.manual_seed(42)
     r, c = 64, 32
     W_data = _make_weight(r, c)
@@ -211,7 +197,6 @@ def test_backward_grad_gamma(pc_level):
     cfg = _TestConfig(pc_level=pc_level, pc_norm_type="F",
                       recover_w_norm=True, learnable_gamma=True)
 
-    # Reference
     W_ref = W_data.clone()
     g_ref = gamma_val.clone().requires_grad_(True)
     out_ref = _ref_apply_preconditioner(W_ref, pc_level, "F", cfg.pc_norm_eps,
@@ -219,7 +204,6 @@ def test_backward_grad_gamma(pc_level):
     out_ref.sum().backward()
     grad_gamma_ref = g_ref.grad.clone()
 
-    # Fused
     W_fused = W_data.clone()
     g_fused = gamma_val.clone().requires_grad_(True)
     pc = PCTransform(cfg)
@@ -230,68 +214,56 @@ def test_backward_grad_gamma(pc_level):
     torch.testing.assert_close(grad_gamma_fused, grad_gamma_ref, atol=1e-3, rtol=1e-3)
 
 
-@pytest.mark.parametrize("pc_level", [1, 2, 3, 4, 5])
-def test_fused_add_scaled_identity_kernel(pc_level):
-    """Directly test the fused_add_scaled_identity kernel."""
-    from torchtitan.pc_layer.pc_layer import fused_add_scaled_identity
-
+@pytest.mark.parametrize("pc_level", [1, 2, 3, 4])
+def test_horner_poly_forward(pc_level):
+    """_horner_poly matches the reference polynomial evaluation."""
     torch.manual_seed(42)
     N = 64
-    M = torch.randn(N, N, device="cuda", dtype=torch.float32)
-    alpha, beta = 3.14, -2.71
+    gram = torch.randn(N, N, device="cuda", dtype=torch.float32)
+    gram = gram.t().mm(gram)  # make it symmetric PSD-like
+    gram = gram / gram.norm()  # normalize
+    eye = torch.eye(N, device="cuda", dtype=torch.float32)
 
-    ref = alpha * torch.eye(N, device="cuda") + beta * M
-    out = fused_add_scaled_identity(M, alpha, beta)
+    I = torch.eye(N, device="cuda", dtype=torch.float32)
+    if pc_level == 1:
+        ref = 1.507 * I - 0.507 * gram
+    elif pc_level == 2:
+        ref = 2.083 * I + gram.mm(-1.643 * I + 0.560 * gram)
+    elif pc_level == 3:
+        ref = 2.909 * I + gram.mm(-4.649 * I + gram.mm(4.023 * I - 1.283 * gram))
+    elif pc_level == 4:
+        ref = 3.625 * I + gram.mm(-9.261 * I + gram.mm(14.097 * I + gram.mm(-10.351 * I + 2.890 * gram)))
 
-    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
-
-
-def test_fused_axpby_kernel():
-    """Directly test the fused_axpby kernel."""
-    from torchtitan.pc_layer.pc_layer import fused_axpby
-
-    torch.manual_seed(42)
-    A = torch.randn(128, 64, device="cuda", dtype=torch.float32)
-    B = torch.randn(128, 64, device="cuda", dtype=torch.float32)
-    alpha, beta = 0.5, -1.3
-
-    ref = alpha * A + beta * B
-    out = fused_axpby(A, B, alpha, beta)
-
-    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+    out = _horner_poly(gram, eye, _HORNER_COEFFS[pc_level])
+    torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
 
 
-def test_fused_add_scaled_identity_backward():
-    """Backward of fused_add_scaled_identity produces correct gradients."""
-    from torchtitan.pc_layer.pc_layer import fused_add_scaled_identity
-
+@pytest.mark.parametrize("pc_level", [1, 2, 3, 4])
+def test_horner_poly_backward(pc_level):
+    """_horner_poly backward produces correct gradients."""
     torch.manual_seed(42)
     N = 32
-    M = torch.randn(N, N, device="cuda", requires_grad=True)
-    alpha, beta = 2.0, 0.7
+    M = torch.randn(N, N, device="cuda", dtype=torch.float32, requires_grad=True)
+    eye = torch.eye(N, device="cuda", dtype=torch.float32)
 
-    out = fused_add_scaled_identity(M, alpha, beta)
+    out = _horner_poly(M, eye, _HORNER_COEFFS[pc_level])
     out.sum().backward()
+    grad_horner = M.grad.clone()
 
-    # d(alpha*I + beta*M)/dM = beta
-    expected_grad = torch.full_like(M, beta)
-    torch.testing.assert_close(M.grad, expected_grad, atol=1e-5, rtol=1e-5)
+    M2 = M.detach().clone().requires_grad_(True)
+    I = torch.eye(N, device="cuda", dtype=torch.float32)
+    if pc_level == 1:
+        ref = 1.507 * I - 0.507 * M2
+    elif pc_level == 2:
+        ref = 2.083 * I + M2.mm(-1.643 * I + 0.560 * M2)
+    elif pc_level == 3:
+        ref = 2.909 * I + M2.mm(-4.649 * I + M2.mm(4.023 * I - 1.283 * M2))
+    elif pc_level == 4:
+        ref = 3.625 * I + M2.mm(-9.261 * I + M2.mm(14.097 * I + M2.mm(-10.351 * I + 2.890 * M2)))
+    ref.sum().backward()
+    grad_ref = M2.grad.clone()
 
-
-def test_fused_axpby_backward():
-    """Backward of fused_axpby produces correct gradients."""
-    from torchtitan.pc_layer.pc_layer import fused_axpby
-
-    torch.manual_seed(42)
-    A = torch.randn(32, 64, device="cuda", requires_grad=True)
-    B = torch.randn(32, 64, device="cuda", requires_grad=True)
-    alpha, beta = 1.5, -0.8
-
-    out = fused_axpby(A, B, alpha, beta)
-    out.sum().backward()
-
-    torch.testing.assert_close(A.grad, torch.full_like(A, alpha), atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(B.grad, torch.full_like(B, beta), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(grad_horner, grad_ref, atol=1e-3, rtol=1e-3)
 
 
 if __name__ == "__main__":
