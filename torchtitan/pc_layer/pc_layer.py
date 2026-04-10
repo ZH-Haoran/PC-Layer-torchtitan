@@ -6,6 +6,148 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.distributed._tensor import Replicate
 
+import triton
+import triton.language as tl
+
+
+# ── Triton kernels ───────────────────────────────────────────────────
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4),
+        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8),
+        triton.Config({"BLOCK_SIZE": 4096}, num_warps=16),
+    ],
+    key=["n_elements"],
+)
+@triton.jit
+def _add_scaled_identity_kernel(
+    M_ptr,
+    Out_ptr,
+    alpha,
+    beta,
+    N,          # matrix side length (N×N)
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    m = tl.load(M_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+
+    row = offsets // N
+    col = offsets % N
+    diag = tl.where(row == col, alpha, 0.0)
+
+    result = diag + beta * m
+
+    tl.store(Out_ptr + offsets, result, mask=mask)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=4),
+        triton.Config({"BLOCK_SIZE": 2048}, num_warps=8),
+        triton.Config({"BLOCK_SIZE": 4096}, num_warps=16),
+    ],
+    key=["n_elements"],
+)
+@triton.jit
+def _axpby_kernel(
+    A_ptr,
+    B_ptr,
+    Out_ptr,
+    alpha,
+    beta,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    a = tl.load(A_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(B_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+
+    result = alpha * a + beta * b
+
+    tl.store(Out_ptr + offsets, result, mask=mask)
+
+
+# ── Autograd wrappers ────────────────────────────────────────────────
+
+class _AddScaledIdentityOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, M, alpha, beta):
+        assert M.ndim == 2 and M.shape[0] == M.shape[1]
+        M = M.contiguous()
+        N = M.shape[0]
+        n_elements = N * N
+        out = torch.empty_like(M)
+
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        _add_scaled_identity_kernel[grid](
+            M, out,
+            float(alpha), float(beta),
+            N, n_elements,
+        )
+
+        ctx.beta = beta
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output * ctx.beta, None, None
+
+
+class _AxpbyOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, A, B, alpha, beta):
+        A = A.contiguous()
+        B = B.contiguous()
+        n_elements = A.numel()
+        out = torch.empty_like(A)
+
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        _axpby_kernel[grid](
+            A, B, out,
+            float(alpha), float(beta),
+            n_elements,
+        )
+
+        ctx.alpha = alpha
+        ctx.beta = beta
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output * ctx.alpha, grad_output * ctx.beta, None, None
+
+
+# ── Fused helper functions ───────────────────────────────────────────
+
+def fused_add_scaled_identity(M, alpha, beta):
+    """Compute alpha*I + beta*M for a square matrix.
+    Falls back to torch ops for DTensor inputs.
+    """
+    if isinstance(M, DTensor):
+        N = M.shape[0]
+        I = torch.eye(N, device=M.device, dtype=M.dtype)
+        return alpha * I + beta * M
+    return _AddScaledIdentityOp.apply(M, alpha, beta)
+
+
+def fused_axpby(A, B, alpha, beta):
+    """Compute alpha*A + beta*B for same-shape tensors.
+    Falls back to torch ops for DTensor inputs.
+    """
+    if isinstance(A, DTensor) or isinstance(B, DTensor):
+        return alpha * A + beta * B
+    return _AxpbyOp.apply(A, B, alpha, beta)
+
+
+# ── Constants ────────────────────────────────────────────────────────
 
 _POLAR_EXPRESS_COEFFS = [
     (7.2086, -15.5131, 9.0178),
@@ -65,13 +207,13 @@ class PCTransform(nn.Module):
                 weight=W_normalized, model_config=model_config, gram=use_gram
             )
 
-        W_preconditioned *= model_config.scale_constant
+        combined_scale = model_config.scale_constant
         if model_config.recover_w_norm:
-            norm_for_recover = W_norm.detach()
-            W_preconditioned = W_preconditioned * norm_for_recover
+            combined_scale = combined_scale * W_norm.detach()
         if model_config.learnable_gamma and gamma is not None:
             gamma = gamma.to(dtype=W_preconditioned.dtype, device=W_preconditioned.device)
-            W_preconditioned = W_preconditioned * gamma
+            combined_scale = combined_scale * gamma
+        W_preconditioned = W_preconditioned * combined_scale
 
         if return_norm:
             return W_preconditioned, W_norm
@@ -124,25 +266,42 @@ class PCTransform(nn.Module):
         pc_level = model_config.pc_level
         if pc_level == 0:
             return weight
-        
-        _, c = weight.shape
-        I = torch.eye(c, device=weight.device, dtype=weight.dtype)
+
         wtw = gram if gram is not None else weight.t().mm(weight)
 
         if pc_level == 1:
-            weight = weight.mm(1.507 * I - 0.507 * wtw)
+            T = fused_add_scaled_identity(wtw, 1.507, -0.507)
+            weight = weight.mm(T)
         elif pc_level == 2:
-            weight = weight.mm(2.083 * I + wtw.mm(-1.643 * I + 0.560 * wtw))
+            T = fused_add_scaled_identity(wtw, -1.643, 0.560)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, 2.083, 1.0)
+            weight = weight.mm(T)
         elif pc_level == 3:
-            weight = weight.mm(2.909 * I + wtw.mm(-4.649 * I + wtw.mm(4.023 * I - 1.283 * wtw)))
+            T = fused_add_scaled_identity(wtw, 4.023, -1.283)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, -4.649, 1.0)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, 2.909, 1.0)
+            weight = weight.mm(T)
         elif pc_level == 4:
-            weight = weight.mm(3.625 * I + wtw.mm(-9.261 * I + wtw.mm(14.097 * I + wtw.mm(-10.351 * I + 2.890 * wtw))))
+            T = fused_add_scaled_identity(wtw, -10.351, 2.890)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, 14.097, 1.0)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, -9.261, 1.0)
+            T = wtw.mm(T)
+            T = fused_add_scaled_identity(T, 3.625, 1.0)
+            weight = weight.mm(T)
         elif pc_level == 5:
             # Polar express iterative Newton-Schulz (tall: apply from right)
             for i, (a, b, c_coeff) in enumerate(_POLAR_EXPRESS_COEFFS):
                 if i > 0:
                     wtw = weight.t().mm(weight)
-                weight = a * weight + weight.mm(b * wtw + c_coeff * wtw.mm(wtw))
+                wtw2 = wtw.mm(wtw)
+                T = fused_axpby(wtw, wtw2, b, c_coeff)
+                WT = weight.mm(T)
+                weight = fused_axpby(weight, WT, a, 1.0)
         else:
             raise ValueError("No pre-conditioner provided")
         return weight
@@ -152,24 +311,41 @@ class PCTransform(nn.Module):
         if pc_level == 0:
             return weight
 
-        r, _ = weight.shape
-        I = torch.eye(r, device=weight.device, dtype=weight.dtype)
         wwt = gram if gram is not None else weight.mm(weight.t())
 
         if pc_level == 1:
-            weight = (1.507 * I - 0.507 * wwt).mm(weight)
+            T = fused_add_scaled_identity(wwt, 1.507, -0.507)
+            weight = T.mm(weight)
         elif pc_level == 2:
-            weight = (2.083 * I + wwt.mm(-1.643 * I + 0.560 * wwt)).mm(weight)
+            T = fused_add_scaled_identity(wwt, -1.643, 0.560)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, 2.083, 1.0)
+            weight = T.mm(weight)
         elif pc_level == 3:
-            weight = (2.909 * I + wwt.mm(-4.649 * I + wwt.mm(4.023 * I - 1.283 * wwt))).mm(weight)
+            T = fused_add_scaled_identity(wwt, 4.023, -1.283)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, -4.649, 1.0)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, 2.909, 1.0)
+            weight = T.mm(weight)
         elif pc_level == 4:
-            weight = (3.625 * I + wwt.mm(-9.261 * I + wwt.mm(14.097 * I + wwt.mm(-10.351 * I + 2.890 * wwt)))).mm(weight)
+            T = fused_add_scaled_identity(wwt, -10.351, 2.890)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, 14.097, 1.0)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, -9.261, 1.0)
+            T = wwt.mm(T)
+            T = fused_add_scaled_identity(T, 3.625, 1.0)
+            weight = T.mm(weight)
         elif pc_level == 5:
             # Polar express iterative Newton-Schulz (wide: apply from left)
             for i, (a, b, c_coeff) in enumerate(_POLAR_EXPRESS_COEFFS):
                 if i > 0:
                     wwt = weight.mm(weight.t())
-                weight = a * weight + (b * wwt + c_coeff * wwt.mm(wwt)).mm(weight)
+                wwt2 = wwt.mm(wwt)
+                T = fused_axpby(wwt, wwt2, b, c_coeff)
+                TW = T.mm(weight)
+                weight = fused_axpby(weight, TW, a, 1.0)
         else:
             raise ValueError("No pre-conditioner provided")
         return weight
