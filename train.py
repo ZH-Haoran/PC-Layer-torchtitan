@@ -51,6 +51,7 @@ from torchtitan.pc_layer.pc_layer import (
     model_uses_op_norm,
     update_model_op_state,
 )
+from torchtitan.pc_layer.svd_tracking import SVDTracker
 from torchtitan.utils import (
     Color,
     dist_max,
@@ -928,6 +929,17 @@ def main(job_config: JobConfig):
     if not parallel_dims.pp_enabled and model_uses_op_norm(whole_model):
         update_model_op_state(whole_model, step=0)
 
+    # Full-SVD spectral-norm tracker: records ground-truth sigma_1 every
+    # svd_freq steps so the power-iter estimate used by PCLinear can be validated.
+    svd_tracker = SVDTracker(
+        model=whole_model,
+        model_config=model_config,
+        output_dir=str(Path(__file__).resolve().parent / "tmp"),
+        svd_freq=20,
+        global_rank=global_rank,
+        run_tag=f"{job_config.model.name}_{job_config.model.flavor}_{job_config.metrics.wandb_comment}",
+    )
+
     checkpoint.reset()
 
     # variables used to keep info for metrics logging
@@ -1101,6 +1113,10 @@ def main(job_config: JobConfig):
             if not parallel_dims.pp_enabled:
                 update_model_op_state(whole_model, step=train_state.step)
             lr_schedulers.step()
+
+            # Full-SVD ground-truth spectral norm snapshot (every svd_freq steps).
+            # Placed after update_model_op_state so op_u/op_v reflect the current weights.
+            svd_tracker.maybe_log(train_state.step)
 
             # === Log current learning rate to SwanLab ===
             if global_rank == 0 and job_config.metrics.enable_wandb:
