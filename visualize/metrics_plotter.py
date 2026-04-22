@@ -9,26 +9,58 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+matplotlib.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": 16,
+    "axes.titlesize": 20,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 15,
+    "ytick.labelsize": 15,
+    "axes.linewidth": 1.2,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+    "grid.linewidth": 0.8,
+    "grid.linestyle": (0, (8, 6)),
+    "ytick.major.width": 1.2,
+    "ytick.major.size": 5,
+    "ytick.direction": "in",
+    "figure.dpi": 150,
+    "savefig.dpi": 600,
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.05,
+})
+
 from .plotter import extract_layer_id, get_record_label, sanitize_path_component
 
+COLORS = [
+    "#1f77b4",  # blue (matplotlib default)
+    "#ff7f0e",  # orange (matplotlib default)
+    "#2ca02c",  # green (matplotlib default)
+    "#d62728",  # red (matplotlib default)
+    "#7B2D8E",  # purple
+    "#E76F51",  # coral
+    "#264653",  # dark teal
+    "#A8DADC",  # light blue
+    "#C2185B",  # deep pink
+    "#4CAF50",  # green
+    "#FF7043",  # deep orange
+    "#5C6BC0",  # indigo
+    "#8D6E63",  # brown
+    "#00ACC1",  # cyan
+    "#AFB42B",  # lime
+    "#E91E63",  # pink
+]
+
+
+MARKERS = ["s", "D", "^", "o", "v", "P", "*", "X", "p", "h"]
 
 _WEIGHT_TYPES = ["wq", "wk", "wv", "wo", "w1", "w2", "w3", "c_fc", "c_proj"]
 _WEIGHT_TYPE_ORDER = {weight_type: idx for idx, weight_type in enumerate(_WEIGHT_TYPES)}
-_COLORS = [
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#7f7f7f",
-    "#bcbd22",
-    "#17becf",
-]
 
 
 def extract_weight_type(layer_name: str) -> Optional[str]:
@@ -177,6 +209,8 @@ METRIC_REGISTRY: Dict[str, Dict[str, Any]] = {
         "display_name": "Modified Condition Number",
         "y_label": "Modified Condition Number",
         "default_global_aggregator": "geometric_mean",
+        "global_display_name": "GMCN",
+        "global_y_label": "GMCN",
     },
     "quantile_condition_number": {
         "function": compute_quantile_condition_number,
@@ -349,9 +383,17 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
                  output_path: Path,
                  paired_series_by_label: Optional[Dict[str, Dict[int, float]]] = None,
                  paired_y_label: Optional[str] = None,
-                 paired_display_name: Optional[str] = None) -> bool:
+                 paired_display_name: Optional[str] = None,
+                 x_label: str = "Step",
+                 total_tokens: Optional[float] = None,
+                 max_step: Optional[int] = None) -> bool:
     if not series_by_label:
         return False
+
+    def _convert_x(steps: List[int]) -> List[float]:
+        if total_tokens is not None and max_step is not None and max_step > 0:
+            return [s / max_step * total_tokens for s in steps]
+        return [float(s) for s in steps]
 
     fig, ax = plt.subplots(figsize=(10, 6))
     plotted = False
@@ -362,12 +404,14 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
             continue
 
         steps = sorted(step_map)
+        x_values = _convert_x(steps)
         values = [step_map[step] for step in steps]
         if not np.isfinite(np.asarray(values, dtype=float)).any():
             continue
 
-        color = _COLORS[idx % len(_COLORS)]
-        ax.plot(steps, values, marker="o", linewidth=2, markersize=4, color=color, label=label)
+        color = COLORS[idx % len(COLORS)]
+        marker = MARKERS[idx % len(MARKERS)]
+        ax.plot(x_values, values, marker=marker, linewidth=2, markersize=7, color=color, label=label)
         plotted = True
 
     if paired_series_by_label:
@@ -376,18 +420,20 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
                 continue
 
             steps = sorted(step_map)
+            x_values = _convert_x(steps)
             values = [step_map[step] for step in steps]
             if not np.isfinite(np.asarray(values, dtype=float)).any():
                 continue
 
-            color = _COLORS[idx % len(_COLORS)]
+            color = COLORS[idx % len(COLORS)]
+            marker = MARKERS[idx % len(MARKERS)]
             paired_label = label if paired_display_name is None else f"{label} ({paired_display_name})"
             ax.plot(
-                steps,
+                x_values,
                 values,
-                marker="x",
+                marker=marker,
                 linewidth=2,
-                markersize=4,
+                markersize=7,
                 linestyle="--",
                 color=color,
                 label=paired_label,
@@ -398,18 +444,22 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
         plt.close(fig)
         return False
 
-    ax.set_xlabel("Step", fontsize=12)
-    ax.set_ylabel(y_label if not paired_plotted or not paired_y_label else f"{y_label} / {paired_y_label}", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label if not paired_plotted or not paired_y_label else f"{y_label} / {paired_y_label}")
+    ax.set_title(title)
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(handles, labels, fontsize=10)
+        ax.legend(handles, labels)
+
+    # y-axis minor ticks only
+    ax.minorticks_on()
+    ax.tick_params(axis="x", which="minor", bottom=False)
+    ax.tick_params(axis="y", which="minor", length=3, width=0.8, direction="in")
 
     plt.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(output_path)
     plt.close(fig)
     print(f"Saved: {output_path}")
     return True
@@ -417,10 +467,44 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
 
 def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                          metric_names: Optional[Sequence[str]] = None,
-                         output_dir: Optional[str] = None) -> List[str]:
-    """Load experiment directories and plot metric-vs-step curves."""
+                         output_dir: Optional[str] = None,
+                         labels: Optional[Sequence[str]] = None,
+                         x_unit: str = "step",
+                         total_tokens: Optional[float] = None,
+                         plot_levels: Optional[Sequence[str]] = None,
+                         fmt: str = "pdf") -> List[str]:
+    """Load experiment directories and plot metric-vs-step curves.
+
+    Args:
+        experiment_dirs: Paths to experiment directories.
+        metric_names: Which metrics to plot (default: all).
+        output_dir: Override output directory.
+        labels: Custom legend labels, one per experiment directory.
+        x_unit: "step" (default) or "token".  When "token", *total_tokens*
+            must be provided and the x-axis shows Total Tokens Trained (B).
+        total_tokens: Total tokens (in billions) at the max step.  Required
+            when *x_unit* is "token".
+        plot_levels: Subset of {"per_layer", "per_block", "global"} to plot.
+            Default: all levels allowed by each metric spec.
+    """
     if not experiment_dirs:
         raise ValueError("At least one experiment directory is required")
+
+    if x_unit not in ("step", "token"):
+        raise ValueError(f"x_unit must be 'step' or 'token', got '{x_unit}'")
+    if x_unit == "token" and total_tokens is None:
+        raise ValueError("total_tokens is required when x_unit='token'")
+
+    _VALID_LEVELS = {"per_layer", "per_block", "global"}
+    if plot_levels is not None:
+        user_levels = set(plot_levels)
+        unknown_levels = user_levels - _VALID_LEVELS
+        if unknown_levels:
+            raise ValueError(
+                f"Unknown plot levels: {unknown_levels}. Available: {sorted(_VALID_LEVELS)}"
+            )
+    else:
+        user_levels = None
 
     if metric_names is None:
         metric_names = list(METRIC_REGISTRY)
@@ -435,9 +519,35 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
     output_root = _resolve_output_root([experiment["path"] for experiment in experiments], output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # Custom labels override auto-generated ones
+    if labels is not None:
+        if len(labels) != len(experiments):
+            raise ValueError(
+                f"Number of labels ({len(labels)}) must match number of experiments ({len(experiments)})"
+            )
+        unique_labels = list(labels)
+    else:
+        unique_labels = _make_unique_labels(experiments)
+
+    # Compute max step across all experiments for token conversion
+    max_step: Optional[int] = None
+    if x_unit == "token":
+        max_step = max(
+            record["_step"]
+            for experiment in experiments
+            for record in experiment["records"]
+        )
+
+    x_label = "Step" if x_unit == "step" else "Total Tokens Trained (B)"
+    x_unit_label = "Step" if x_unit == "step" else "Tokens"
+
     saved_paths: List[str] = []
 
-    unique_labels = _make_unique_labels(experiments)
+    plot_kwargs: Dict[str, Any] = {
+        "x_label": x_label,
+        "total_tokens": total_tokens if x_unit == "token" else None,
+        "max_step": max_step,
+    }
 
     for metric_name in metric_names:
         metric_spec = METRIC_REGISTRY[metric_name]
@@ -459,53 +569,56 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                 for label, experiment in zip(unique_labels, experiments)
             }
 
-        plot_levels = set(metric_spec.get("plot_levels", ["per_layer", "per_block", "global"]))
+        metric_levels = set(metric_spec.get("plot_levels", ["per_layer", "per_block", "global"]))
+        if user_levels is not None:
+            metric_levels &= user_levels
 
-        all_layers = sorted(
-            {
-                layer_name
-                for series in experiment_series.values()
-                for layer_name in series["per_layer"].keys()
-            },
-            key=_layer_sort_key,
-        )
-        all_blocks = sorted(
-            {
-                block_name
-                for series in experiment_series.values()
-                for block_name in series["per_block"].keys()
-            },
-            key=lambda block_name: (_WEIGHT_TYPE_ORDER.get(block_name, len(_WEIGHT_TYPE_ORDER)), block_name),
-        )
-
-        for layer_name in all_layers:
-            output_path = per_layer_dir / f"{sanitize_path_component(layer_name)}.png"
-            series_by_label = {
-                label: series["per_layer"][layer_name]
-                for label, series in experiment_series.items()
-                if layer_name in series["per_layer"]
-            }
-            paired_series_by_label = None
-            if paired_experiment_series is not None:
-                paired_series_by_label = {
+        if "per_layer" in metric_levels:
+            all_layers = sorted(
+                {
+                    layer_name
+                    for series in experiment_series.values()
+                    for layer_name in series["per_layer"].keys()
+                },
+                key=_layer_sort_key,
+            )
+            for layer_name in all_layers:
+                output_path = per_layer_dir / f"{sanitize_path_component(layer_name)}.{fmt}"
+                series_by_label = {
                     label: series["per_layer"][layer_name]
-                    for label, series in paired_experiment_series.items()
+                    for label, series in experiment_series.items()
                     if layer_name in series["per_layer"]
                 }
-            if _plot_series(
-                series_by_label,
-                title=f"{metric_spec['display_name']} vs Step - {layer_name}",
-                y_label=metric_spec["y_label"],
-                output_path=output_path,
-                paired_series_by_label=paired_series_by_label,
-                paired_y_label=metric_spec.get("paired_y_label"),
-                paired_display_name=metric_spec.get("paired_display_name"),
-            ):
-                saved_paths.append(str(output_path))
+                paired_series_by_label = None
+                if paired_experiment_series is not None:
+                    paired_series_by_label = {
+                        label: series["per_layer"][layer_name]
+                        for label, series in paired_experiment_series.items()
+                        if layer_name in series["per_layer"]
+                    }
+                if _plot_series(
+                    series_by_label,
+                    title=f"{metric_spec['display_name']} vs {x_unit_label} - {layer_name}",
+                    y_label=metric_spec["y_label"],
+                    output_path=output_path,
+                    paired_series_by_label=paired_series_by_label,
+                    paired_y_label=metric_spec.get("paired_y_label"),
+                    paired_display_name=metric_spec.get("paired_display_name"),
+                    **plot_kwargs,
+                ):
+                    saved_paths.append(str(output_path))
 
-        if "per_block" in plot_levels:
+        if "per_block" in metric_levels:
+            all_blocks = sorted(
+                {
+                    block_name
+                    for series in experiment_series.values()
+                    for block_name in series["per_block"].keys()
+                },
+                key=lambda block_name: (_WEIGHT_TYPE_ORDER.get(block_name, len(_WEIGHT_TYPE_ORDER)), block_name),
+            )
             for block_name in all_blocks:
-                output_path = per_block_dir / f"{sanitize_path_component(block_name)}.png"
+                output_path = per_block_dir / f"{sanitize_path_component(block_name)}.{fmt}"
                 series_by_label = {
                     label: series["per_block"][block_name]
                     for label, series in experiment_series.items()
@@ -520,17 +633,20 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                     }
                 if _plot_series(
                     series_by_label,
-                    title=f"{metric_spec['display_name']} vs Step - {block_name.upper()}",
+                    title=f"{metric_spec['display_name']} vs {x_unit_label} - {block_name.upper()}",
                     y_label=metric_spec["y_label"],
                     output_path=output_path,
                     paired_series_by_label=paired_series_by_label,
                     paired_y_label=metric_spec.get("paired_y_label"),
                     paired_display_name=metric_spec.get("paired_display_name"),
+                    **plot_kwargs,
                 ):
                     saved_paths.append(str(output_path))
 
-        if "global" in plot_levels:
-            global_output_path = metric_dir / "global.png"
+        if "global" in metric_levels:
+            global_output_path = metric_dir / f"global.{fmt}"
+            global_display = metric_spec.get("global_display_name", metric_spec["display_name"])
+            global_y = metric_spec.get("global_y_label", metric_spec["y_label"])
             global_series_by_label = {
                 label: series["global"]
                 for label, series in experiment_series.items()
@@ -545,12 +661,13 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                 }
             if _plot_series(
                 global_series_by_label,
-                title=f"{metric_spec['display_name']} vs Step - Global",
-                y_label=metric_spec["y_label"],
+                title=f"{global_display} vs {x_unit_label}",
+                y_label=global_y,
                 output_path=global_output_path,
                 paired_series_by_label=paired_global_series_by_label,
                 paired_y_label=metric_spec.get("paired_y_label"),
                 paired_display_name=metric_spec.get("paired_display_name"),
+                **plot_kwargs,
             ):
                 saved_paths.append(str(global_output_path))
 
@@ -578,12 +695,48 @@ def main() -> None:
         default=None,
         help="Optional output directory. Defaults to <exp_dir>/metrics_vs_step or a combined sibling directory.",
     )
+    parser.add_argument(
+        "--labels",
+        nargs="+",
+        default=None,
+        help="Custom legend labels, one per experiment directory.",
+    )
+    parser.add_argument(
+        "--x-unit",
+        choices=["step", "token"],
+        default="step",
+        help="X-axis unit: 'step' (default) or 'token'.",
+    )
+    parser.add_argument(
+        "--total-tokens",
+        type=float,
+        default=None,
+        help="Total tokens trained (in billions) at the max step. Required when --x-unit=token.",
+    )
+    parser.add_argument(
+        "--plot-levels",
+        nargs="+",
+        choices=["per_layer", "per_block", "global"],
+        default=None,
+        help="Which granularity levels to plot (default: all). Choose from: per_layer, per_block, global.",
+    )
+    parser.add_argument(
+        "--fmt",
+        choices=["pdf", "png"],
+        default="pdf",
+        help="Output image format (default: pdf).",
+    )
     args = parser.parse_args()
 
     plot_metrics_vs_step(
         experiment_dirs=args.experiment_dirs,
         metric_names=args.metrics,
         output_dir=args.output_dir,
+        labels=args.labels,
+        x_unit=args.x_unit,
+        total_tokens=args.total_tokens,
+        plot_levels=args.plot_levels,
+        fmt=args.fmt,
     )
 
 

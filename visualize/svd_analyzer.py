@@ -15,7 +15,6 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from .plotter import plot_singular_values, plot_normalized_weight_histograms
 
 
 # Mapping from weight key to PC config flag
@@ -645,15 +644,6 @@ def run_visualize(job_config) -> List[str]:
         output_path = save_singular_values(svd_results, metadata, output_dir, step=step)
         logger.info(f"Saved singular values to: {output_path}")
         saved_paths.append(output_path)
-
-        # Generate histogram for this step
-        step_output_dir = f"{output_dir}/step_{step}"
-        with open(output_path, 'r') as f:
-            record = json.load(f)
-            record["_source_path"] = output_path
-        plot_singular_values([record], output_dir=step_output_dir)
-        plot_normalized_weight_histograms([record], output_dir=step_output_dir)
-        logger.info(f"Histogram saved to: {step_output_dir}")
 
         # Clean up model to free memory
         del model, dummy_optimizer, dummy_lr_scheduler, checkpoint
