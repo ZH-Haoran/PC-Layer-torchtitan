@@ -571,6 +571,8 @@ MODEL_CONFIG_KEYS = {
     'precondition_qk',
     'precondition_v',
     'power_iter',
+    'power_iter_warmup_steps',
+    'power_iter_warmup_value',
     'pc_norm_type',
     'pc_norm_eps',
     'pc_op_beta',
@@ -924,7 +926,7 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     if not parallel_dims.pp_enabled and model_uses_op_norm(whole_model):
-        update_model_op_state(whole_model)
+        update_model_op_state(whole_model, step=0)
 
     checkpoint.reset()
 
@@ -1097,7 +1099,7 @@ def main(job_config: JobConfig):
             checkpoint.wait_for_staging()
             optimizers.step()
             if not parallel_dims.pp_enabled:
-                update_model_op_state(whole_model)
+                update_model_op_state(whole_model, step=train_state.step)
             lr_schedulers.step()
 
             # === Log current learning rate to SwanLab ===

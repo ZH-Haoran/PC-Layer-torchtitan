@@ -213,14 +213,14 @@ class PCLinear(nn.Module):
         return vec / (vec.norm() + self.model_args.pc_norm_eps)
 
     @torch.no_grad()
-    def update_op_state(self):
+    def update_op_state(self, step=None):
         if not self._uses_op_norm():
             return
         weight = self.linear.weight
         op_weight = self._get_weight_for_op(weight)
         self._initialize_op_state_if_needed(op_weight)
         if not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0:
-            u, v = self._compute_updated_op_state(op_weight)
+            u, v = self._compute_updated_op_state(op_weight, step=step)
             self.op_u.copy_(u)
             self.op_v.copy_(v)
         self._broadcast_op_state()
@@ -292,7 +292,7 @@ class PCLinear(nn.Module):
             )
 
     @torch.no_grad()
-    def _compute_updated_op_state(self, weight):
+    def _compute_updated_op_state(self, weight, step=None):
         beta = float(getattr(self.model_args, "pc_op_beta", 0.0))
         beta = max(0.0, min(1.0, beta))
 
@@ -304,7 +304,14 @@ class PCLinear(nn.Module):
         u = self._normalize_vector(u)
         v = self._normalize_vector(v)
 
-        for _ in range(self.model_args.power_iter):
+        warmup_steps = int(self.model_args.power_iter_warmup_steps)
+        warmup_value = int(self.model_args.power_iter_warmup_value)
+        if step is not None and step <= warmup_steps:
+            n_iters = warmup_value
+        else:
+            n_iters = self.model_args.power_iter
+
+        for _ in range(n_iters):
             v = self._normalize_vector(torch.mv(weight.T, u))
             u = self._normalize_vector(torch.mv(weight, v))
 
@@ -355,7 +362,7 @@ def model_uses_op_norm(module):
 
 
 @torch.no_grad()
-def update_model_op_state(module):
+def update_model_op_state(module, step=None):
     for submodule in iter_pc_linear_modules(module):
         if submodule._uses_op_norm():
-            submodule.update_op_state()
+            submodule.update_op_state(step=step)
