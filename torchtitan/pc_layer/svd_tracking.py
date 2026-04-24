@@ -21,7 +21,7 @@ from torch.distributed.tensor import DTensor
 
 DEFAULT_TARGET_LAYERS: List[int] = [0, 1, 9, 16, 17]
 DEFAULT_TARGET_MATRICES: List[str] = ["wo", "w1", "w2", "w3"]
-DEFAULT_SVD_FREQ: int = 20
+DEFAULT_SVD_FREQ: int = 200
 
 
 def _materialize_full_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -146,7 +146,7 @@ class SVDTracker:
                 f.write(json.dumps(metadata) + "\n")
 
     def should_compute(self, step: int) -> bool:
-        return step > 0 and step % self.svd_freq == 0
+        return self.svd_freq > 0 and step > 0 and step % self.svd_freq == 0
 
     @torch.no_grad()
     def _compute_snapshot(self, step: int) -> Dict:

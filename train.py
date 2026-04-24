@@ -935,7 +935,7 @@ def main(job_config: JobConfig):
         model=whole_model,
         model_config=model_config,
         output_dir=str(Path(__file__).resolve().parent / "tmp"),
-        svd_freq=20,
+        svd_freq=job_config.training.svd_freq,
         global_rank=global_rank,
         run_tag=f"{job_config.model.name}_{job_config.model.flavor}_{job_config.metrics.wandb_comment}",
     )

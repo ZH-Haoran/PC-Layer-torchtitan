@@ -403,6 +403,12 @@ class JobConfig:
             default=50,
             help="Python garbage control scheduling interval, in steps",
         )
+        self.parser.add_argument(
+            "--training.svd_freq",
+            type=int,
+            default=200,
+            help="How often to run full-SVD spectral norm tracking, in steps",
+        )
 
         # checkpointing configs
         self.parser.add_argument(
