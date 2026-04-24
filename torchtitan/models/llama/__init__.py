@@ -25,6 +25,7 @@ llama2_configs = {
     "271M": ModelArgs(dim=1024, n_layers=16, n_heads=16),
     "297M": ModelArgs(dim=1024, n_layers=18, n_heads=16),
     "360M": ModelArgs(dim=1152, n_layers=18, n_heads=16),
+    "1B_deep64": ModelArgs(dim=1024, n_layers=64, n_heads=8),
     "1B": ModelArgs(dim=2048, n_layers=18, n_heads=16),
     "7B": ModelArgs(dim=4096, n_layers=32, n_heads=32),
     "13B": ModelArgs(dim=5120, n_layers=40, n_heads=40),
