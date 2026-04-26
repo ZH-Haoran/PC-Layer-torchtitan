@@ -27,7 +27,9 @@ norm_type = "fused_rmsnorm"  #[layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
 tokenizer_path ="./tokenizer.model"
 # for baseline ,set 5 pre* to be false
 # for pc_layer, set pre* to be true except precondition_qk and precondition_feature_matrix
-precondition_mlp = false
+precondition_w1 = false
+precondition_w2 = false
+precondition_w3 = false
 precondition_o = false
 precondition_qk = false
 precondition_v = false

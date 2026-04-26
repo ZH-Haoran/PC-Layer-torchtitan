@@ -40,7 +40,9 @@ class ModelArgs:
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "rmsnorm"
-    precondition_mlp: bool = False
+    precondition_w1: bool = False
+    precondition_w2: bool = False
+    precondition_w3: bool = False
     precondition_qk: bool = False
     precondition_v: bool = False
     precondition_o: bool = False
@@ -332,14 +334,9 @@ class FeedForward(nn.Module):
         w3 = nn.Linear(dim, hidden_dim, bias=False)
 
         # 使用 PCLinear 包裹 nn.Linear（根据配置）
-        if model_args.precondition_mlp:
-            self.w1 = PCLinear(w1, model_args, layer_id)
-            self.w2 = PCLinear(w2, model_args, layer_id)
-            self.w3 = PCLinear(w3, model_args, layer_id)
-        else:
-            self.w1 = w1
-            self.w2 = w2
-            self.w3 = w3
+        self.w1 = PCLinear(w1, model_args, layer_id) if model_args.precondition_w1 else w1
+        self.w2 = PCLinear(w2, model_args, layer_id) if model_args.precondition_w2 else w2
+        self.w3 = PCLinear(w3, model_args, layer_id) if model_args.precondition_w3 else w3
 
         # Initialize w3 weights to zeros
         # with torch.no_grad():

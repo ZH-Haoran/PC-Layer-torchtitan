@@ -579,7 +579,9 @@ def save_config_files(job_config):
 # 需要从job_config传入的参数列表 (Llama-specific research features)
 MODEL_CONFIG_KEYS = {
     'norm_type',
-    'precondition_mlp',
+    'precondition_w1',
+    'precondition_w2',
+    'precondition_w3',
     'precondition_o',
     'precondition_qk',
     'precondition_v',
@@ -1210,7 +1212,8 @@ def main(job_config: JobConfig):
                     # 只有当任一 precondition 开启时才记录实际的 pc_level，否则记录 0
                     pc_level_value = (
                         model_config.pc_level
-                        if (model_config.precondition_mlp or model_config.precondition_o
+                        if (model_config.precondition_w1 or model_config.precondition_w2
+                            or model_config.precondition_w3 or model_config.precondition_o
                             or model_config.precondition_qk or model_config.precondition_v)
                         else 0
                     )

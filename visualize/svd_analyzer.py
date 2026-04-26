@@ -21,7 +21,7 @@ from tqdm import tqdm
 _WEIGHT_KEY_TO_PC_FLAG = {
     'wq': 'precondition_qk', 'wk': 'precondition_qk',
     'wv': 'precondition_v', 'wo': 'precondition_o',
-    'w1': 'precondition_mlp', 'w2': 'precondition_mlp', 'w3': 'precondition_mlp',
+    'w1': 'precondition_w1', 'w2': 'precondition_w2', 'w3': 'precondition_w3',
     'c_fc': 'precondition_mlp', 'c_proj': 'precondition_mlp',
 }
 
@@ -218,7 +218,8 @@ def compute_svd_with_pc(weights: Dict[str, torch.Tensor], model_config, step: Op
 
 def has_any_pc_enabled(model_config) -> bool:
     """Check if any PC flag is enabled in the config."""
-    pc_flags = ['precondition_mlp', 'precondition_o', 'precondition_qk', 'precondition_v']
+    pc_flags = ['precondition_w1', 'precondition_w2', 'precondition_w3',
+                'precondition_o', 'precondition_qk', 'precondition_v']
     return any(getattr(model_config, flag, False) for flag in pc_flags)
 
 
@@ -437,7 +438,9 @@ def run_visualize(job_config) -> List[str]:
     # This is critical for proper model architecture matching the checkpoint
     MODEL_CONFIG_KEYS = {
         'norm_type',
-        'precondition_mlp',
+        'precondition_w1',
+        'precondition_w2',
+        'precondition_w3',
         'precondition_o',
         'precondition_qk',
         'precondition_v',
@@ -628,7 +631,9 @@ def run_visualize(job_config) -> List[str]:
         }
         if pc_enabled:
             metadata["pc_config"] = {
-                "precondition_mlp": getattr(job_config.model, 'precondition_mlp', False),
+                "precondition_w1": getattr(job_config.model, 'precondition_w1', False),
+                "precondition_w2": getattr(job_config.model, 'precondition_w2', False),
+                "precondition_w3": getattr(job_config.model, 'precondition_w3', False),
                 "precondition_o": getattr(job_config.model, 'precondition_o', False),
                 "precondition_qk": getattr(job_config.model, 'precondition_qk', False),
                 "precondition_v": getattr(job_config.model, 'precondition_v', False),

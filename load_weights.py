@@ -409,7 +409,9 @@ def main(job_config: JobConfig):
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
-    model_config.precondition_mlp = job_config.model.precondition_mlp
+    model_config.precondition_w1 = job_config.model.precondition_w1
+    model_config.precondition_w2 = job_config.model.precondition_w2
+    model_config.precondition_w3 = job_config.model.precondition_w3
     model_config.power_iter = job_config.model.power_iter
     model_config.pc_norm_type = job_config.model.pc_norm_type
     model_config.pc_norm_eps = job_config.model.pc_norm_eps

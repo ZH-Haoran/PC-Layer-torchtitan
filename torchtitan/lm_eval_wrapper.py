@@ -182,7 +182,9 @@ def _build_model_args(
         args_dict["max_seq_len"] = max_seq_len
 
     for key in (
-        "precondition_mlp",
+        "precondition_w1",
+        "precondition_w2",
+        "precondition_w3",
         "precondition_qk",
         "precondition_v",
         "precondition_o",
