@@ -44,6 +44,7 @@ class ModelArgs:
     precondition_qk: bool = False
     precondition_v: bool = False
     precondition_o: bool = False
+    pc_qkv_per_head: bool = False
     power_iter: int = 5
     # PC norm type: "F" (Frobenius), "modified_F", "op" (operator norm), None (no normalization)
     pc_norm_type: Optional[str] = "F"
@@ -201,9 +202,18 @@ class Attention(nn.Module):
         )
 
         # 使用 PCLinear 包裹 nn.Linear（根据配置）
-        self.wq = PCLinear(wq, model_args, layer_id) if model_args.precondition_qk else wq
-        self.wk = PCLinear(wk, model_args, layer_id) if model_args.precondition_qk else wk
-        self.wv = PCLinear(wv, model_args, layer_id) if model_args.precondition_v else wv
+        self.wq = PCLinear(
+            wq, model_args, layer_id,
+            num_heads=self.n_heads, per_head=model_args.pc_qkv_per_head,
+        ) if model_args.precondition_qk else wq
+        self.wk = PCLinear(
+            wk, model_args, layer_id,
+            num_heads=self.n_kv_heads, per_head=model_args.pc_qkv_per_head,
+        ) if model_args.precondition_qk else wk
+        self.wv = PCLinear(
+            wv, model_args, layer_id,
+            num_heads=self.n_kv_heads, per_head=model_args.pc_qkv_per_head,
+        ) if model_args.precondition_v else wv
         self.wo = PCLinear(wo, model_args, layer_id) if model_args.precondition_o else wo
 
         # Initialize wo weights to zeros

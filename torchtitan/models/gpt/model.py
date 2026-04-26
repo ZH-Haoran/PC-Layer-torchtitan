@@ -60,9 +60,18 @@ class CausalSelfAttention(nn.Module):
         wo = nn.Linear(config.n_head * self.head_dim, config.n_embd, bias=False)
 
         # Wrap with PCLinear based on config flags
-        self.wq = PCLinear(wq, config, layer_id) if config.precondition_qk else wq
-        self.wk = PCLinear(wk, config, layer_id) if config.precondition_qk else wk
-        self.wv = PCLinear(wv, config, layer_id) if config.precondition_v else wv
+        self.wq = PCLinear(
+            wq, config, layer_id,
+            num_heads=config.n_head, per_head=config.pc_qkv_per_head,
+        ) if config.precondition_qk else wq
+        self.wk = PCLinear(
+            wk, config, layer_id,
+            num_heads=config.n_head, per_head=config.pc_qkv_per_head,
+        ) if config.precondition_qk else wk
+        self.wv = PCLinear(
+            wv, config, layer_id,
+            num_heads=config.n_head, per_head=config.pc_qkv_per_head,
+        ) if config.precondition_v else wv
         self.wo = PCLinear(wo, config, layer_id) if config.precondition_o else wo
 
         self.model_args = config
@@ -235,6 +244,7 @@ class GPTConfig:
     precondition_qk: bool = False
     precondition_v: bool = False
     precondition_o: bool = False
+    pc_qkv_per_head: bool = False
     power_iter: int = 5
     # PC norm type: "F" (Frobenius), "modified_F", "op" (operator norm), None (no normalization)
     pc_norm_type: Optional[str] = "F"

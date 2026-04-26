@@ -213,9 +213,22 @@ def log_norms(model, step, global_rank, job_config):
 
         # gamma value & gradient
         if hasattr(g, "v") and g.v is not None:
-            pc_gamma_vals[f"{attr}/{layer_tag}"] = float(g.v.detach().item())
+            v = g.v.detach()
+            if v.numel() == 1:
+                pc_gamma_vals[f"{attr}/{layer_tag}"] = float(v.item())
+            else:
+                # per-head gamma: expand into one metric per head
+                v_flat = v.reshape(-1)
+                for h in range(v_flat.numel()):
+                    pc_gamma_vals[f"{attr}/{layer_tag}/h{h}"] = float(v_flat[h].item())
             if g.v.grad is not None:
-                pc_gamma_grads[f"{attr}_grad/{layer_tag}"] = float(g.v.grad.detach().item())
+                gv = g.v.grad.detach()
+                if gv.numel() == 1:
+                    pc_gamma_grads[f"{attr}_grad/{layer_tag}"] = float(gv.item())
+                else:
+                    gv_flat = gv.reshape(-1)
+                    for h in range(gv_flat.numel()):
+                        pc_gamma_grads[f"{attr}_grad/{layer_tag}/h{h}"] = float(gv_flat[h].item())
 
     # ----------------------------
     # 3) log
@@ -570,6 +583,7 @@ MODEL_CONFIG_KEYS = {
     'precondition_o',
     'precondition_qk',
     'precondition_v',
+    'pc_qkv_per_head',
     'power_iter',
     'power_iter_warmup_steps',
     'power_iter_warmup_value',

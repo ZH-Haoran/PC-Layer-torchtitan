@@ -441,6 +441,7 @@ def run_visualize(job_config) -> List[str]:
         'precondition_o',
         'precondition_qk',
         'precondition_v',
+        'pc_qkv_per_head',
         'power_iter',
         'pc_norm_type',
         'pc_norm_eps',
