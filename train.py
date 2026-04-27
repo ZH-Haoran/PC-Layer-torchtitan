@@ -1112,7 +1112,10 @@ def main(job_config: JobConfig):
                 microbatch_absmax_values.clear()
 
             # Record Grad Norm
-            if model_config.log_gradients and global_rank == 0:
+            # NOTE: must run on all ranks — log_norms() calls DTensor.full_tensor()
+            # which is an NCCL all_gather collective. Running on rank 0 only would
+            # deadlock all other ranks. Internal swanlab.log is already gated on rank 0.
+            if model_config.log_gradients:
                 log_norms(model, train_state.step, global_rank, job_config)
 
             # optimizer step
