@@ -214,6 +214,8 @@ def log_norms(model, step, global_rank, job_config):
         # gamma value & gradient
         if hasattr(g, "v") and g.v is not None:
             v = g.v.detach()
+            if isinstance(v, DTensor):
+                v = v.full_tensor()
             if v.numel() == 1:
                 pc_gamma_vals[f"{attr}/{layer_tag}"] = float(v.item())
             else:
@@ -223,6 +225,8 @@ def log_norms(model, step, global_rank, job_config):
                     pc_gamma_vals[f"{attr}/{layer_tag}/h{h}"] = float(v_flat[h].item())
             if g.v.grad is not None:
                 gv = g.v.grad.detach()
+                if isinstance(gv, DTensor):
+                    gv = gv.full_tensor()
                 if gv.numel() == 1:
                     pc_gamma_grads[f"{attr}_grad/{layer_tag}"] = float(gv.item())
                 else:
