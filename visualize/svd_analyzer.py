@@ -451,6 +451,7 @@ def run_visualize(job_config) -> List[str]:
         'pc_level',
         'recover_w_norm',
         'scale_constant',
+        'mult_mup_factor',
         'learnable_gamma',
         'gamma_init_value',
         'log_signal_propagation',
@@ -640,8 +641,8 @@ def run_visualize(job_config) -> List[str]:
                 "pc_norm_type": getattr(job_config.model, 'pc_norm_type', 'F'),
                 "pc_level": getattr(job_config.model, 'pc_level', 0),
                 "recover_w_norm": getattr(job_config.model, 'recover_w_norm', False),
-                "learnable_gamma": getattr(job_config.model, 'learnable_gamma', False),
                 "scale_constant": getattr(job_config.model, 'scale_constant', None),
+                "mult_mup_factor": getattr(job_config.model, 'mult_mup_factor', False),
                 "learnable_gamma": getattr(job_config.model, 'learnable_gamma', False),
                 "gamma_init_value": getattr(job_config.model, 'gamma_init_value', None),
             }

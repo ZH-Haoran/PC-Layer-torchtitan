@@ -599,6 +599,7 @@ MODEL_CONFIG_KEYS = {
     'pc_level',
     'recover_w_norm',
     'scale_constant',
+    'mult_mup_factor',
     'learnable_gamma',
     'gamma_init_value',
     'log_signal_propagation',

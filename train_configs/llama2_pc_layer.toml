@@ -45,6 +45,7 @@ recover_w_norm = true       # whether multiplying back W norm
 scale_constant = 1.0        # whether multiplying a scaling constant
 learnable_gamma = true      # whether multiplying a learnable scaler gamma
 gamma_init_value = 1.0      # gamma initial value
+mult_mup_factor = false     # whether multiplying mup factor sqrt{d_out / d_in}
 
 log_signal_propagation = true
 log_gradients = true
