@@ -56,6 +56,7 @@ class ModelArgs:
     # Ablation: whether to detach W_norm in the normalization division (weight / W_norm)
     # Ablation: whether to detach W_norm when recovering it after preconditioning (W_pc * W_norm)
     scale_constant: float = 1.0
+    mult_mup_factor: bool = False
     learnable_gamma: bool = False
     gamma_init_value: float = 1.0
 

@@ -73,6 +73,9 @@ class PCTransform(nn.Module):
             )
 
         W_preconditioned *= model_config.scale_constant
+        if model_config.mult_mup_factor:
+            d_out, d_in = W_preconditioned.shape
+            W_preconditioned = W_preconditioned * ((d_out / d_in) ** 0.5)
         if model_config.recover_w_norm:
             norm_for_recover = W_norm.detach()
             W_preconditioned = W_preconditioned * norm_for_recover
@@ -132,6 +135,8 @@ class PCTransform(nn.Module):
         )  # [H, head_dim, in_]
 
         W3_pre = W3_pre * model_config.scale_constant
+        if model_config.mult_mup_factor:
+            W3_pre = W3_pre * ((head_dim / in_) ** 0.5)
         if model_config.recover_w_norm:
             W3_pre = W3_pre * W_norm.detach().view(num_heads, 1, 1)
         if model_config.learnable_gamma and gamma is not None:

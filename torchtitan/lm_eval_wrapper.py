@@ -192,6 +192,7 @@ def _build_model_args(
         "pc_op_beta",
         "recover_w_norm",
         "scale_constant",
+        "mult_mup_factor",
         "learnable_gamma",
         "gamma_init_value",
     ):
