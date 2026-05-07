@@ -165,15 +165,6 @@ def aggregate_geometric_mean(values: Sequence[float]) -> float:
     return float(np.exp(np.mean(np.log(array))))
 
 
-def extract_weight_norm(layer_data: Dict[str, Any], _: Dict[str, Any]) -> float:
-    """Read the saved weight norm directly from layer data."""
-    value = layer_data.get("weight_norm")
-    if value is None:
-        return float("nan")
-    result = float(value)
-    return result if np.isfinite(result) else float("nan")
-
-
 def extract_max_singular_value(layer_data: Dict[str, Any], record_metadata: Dict[str, Any]) -> float:
     """Read the largest singular value from the selected spectrum."""
     singular_values = select_singular_values(layer_data, record_metadata)
@@ -186,8 +177,14 @@ def extract_max_singular_value(layer_data: Dict[str, Any], record_metadata: Dict
     return float(np.max(values))
 
 
-def extract_original_max_singular_value(layer_data: Dict[str, Any], _: Dict[str, Any]) -> float:
-    """Read the largest singular value from the original weight spectrum."""
+def extract_original_max_singular_value(layer_data: Dict[str, Any], record_metadata: Dict[str, Any]) -> float:
+    """Read the largest singular value from the original (pre-PC) spectrum.
+
+    Returns NaN unless PC is actually applied to this layer; otherwise the value
+    is identical to extract_max_singular_value and would just clutter paired plots.
+    """
+    if not (record_metadata.get("pc_enabled") and "singular_values_pc" in layer_data):
+        return float("nan")
     singular_values = layer_data.get("singular_values", [])
     if not singular_values:
         return float("nan")
@@ -196,6 +193,36 @@ def extract_original_max_singular_value(layer_data: Dict[str, Any], _: Dict[str,
     if values.size == 0:
         return float("nan")
     return float(np.max(values))
+
+
+def extract_min_singular_value(layer_data: Dict[str, Any], record_metadata: Dict[str, Any]) -> float:
+    """Read the smallest singular value from the selected spectrum."""
+    singular_values = select_singular_values(layer_data, record_metadata)
+    if not singular_values:
+        return float("nan")
+    values = np.asarray(singular_values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan")
+    return float(np.min(values))
+
+
+def extract_original_min_singular_value(layer_data: Dict[str, Any], record_metadata: Dict[str, Any]) -> float:
+    """Read the smallest singular value from the original (pre-PC) spectrum.
+
+    Returns NaN unless PC is actually applied to this layer; otherwise the value
+    is identical to extract_min_singular_value and would just clutter paired plots.
+    """
+    if not (record_metadata.get("pc_enabled") and "singular_values_pc" in layer_data):
+        return float("nan")
+    singular_values = layer_data.get("singular_values", [])
+    if not singular_values:
+        return float("nan")
+    values = np.asarray(singular_values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan")
+    return float(np.min(values))
 
 
 AGGREGATOR_REGISTRY: Dict[str, Callable[[Sequence[float]], float]] = {
@@ -224,27 +251,40 @@ METRIC_REGISTRY: Dict[str, Dict[str, Any]] = {
         "y_label": "Normalized SVD Entropy",
         "default_global_aggregator": "mean",
     },
-    "weight_norm": {
-        "function": extract_weight_norm,
-        "display_name": "Weight Norm",
-        "y_label": "Weight Norm",
-        "default_global_aggregator": "mean",
-        "paired_metric": "original_max_singular_value",
-        "paired_display_name": "Original Max Singular Value",
-        "paired_y_label": "Original Max Singular Value",
-        "plot_levels": ["per_layer"],
-    },
     "max_singular_value": {
         "function": extract_max_singular_value,
         "display_name": "Max Singular Value",
         "y_label": "Max Singular Value",
         "default_global_aggregator": "mean",
+        "paired_metric": "original_max_singular_value",
+        "paired_display_name": "pre-PC",
+        "paired_y_label": "Max Singular Value (pre-PC)",
+        "primary_display_name": "post-PC",
     },
     "original_max_singular_value": {
         "function": extract_original_max_singular_value,
         "display_name": "Original Max Singular Value",
         "y_label": "Original Max Singular Value",
         "default_global_aggregator": "mean",
+        "paired_only": True,
+    },
+    "min_singular_value": {
+        "function": extract_min_singular_value,
+        "display_name": "Min Singular Value",
+        "y_label": "Min Singular Value",
+        "default_global_aggregator": "mean",
+        "paired_metric": "original_min_singular_value",
+        "paired_display_name": "pre-PC",
+        "paired_y_label": "Min Singular Value (pre-PC)",
+        "primary_display_name": "post-PC",
+        "y_log": True,
+    },
+    "original_min_singular_value": {
+        "function": extract_original_min_singular_value,
+        "display_name": "Original Min Singular Value",
+        "y_label": "Original Min Singular Value",
+        "default_global_aggregator": "mean",
+        "paired_only": True,
     },
 }
 
@@ -384,9 +424,11 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
                  paired_series_by_label: Optional[Dict[str, Dict[int, float]]] = None,
                  paired_y_label: Optional[str] = None,
                  paired_display_name: Optional[str] = None,
+                 primary_display_name: Optional[str] = None,
                  x_label: str = "Step",
                  total_tokens: Optional[float] = None,
-                 max_step: Optional[int] = None) -> bool:
+                 max_step: Optional[int] = None,
+                 y_log: bool = False) -> bool:
     if not series_by_label:
         return False
 
@@ -398,6 +440,17 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
     fig, ax = plt.subplots(figsize=(10, 6))
     plotted = False
     paired_plotted = False
+
+    paired_labels_with_data: set = set()
+    if paired_series_by_label:
+        for paired_label, step_map in paired_series_by_label.items():
+            if not step_map:
+                continue
+            values = np.asarray(list(step_map.values()), dtype=float)
+            if np.isfinite(values).any():
+                paired_labels_with_data.add(paired_label)
+
+    apply_primary_suffix = bool(paired_labels_with_data) and primary_display_name is not None
 
     for idx, (label, step_map) in enumerate(series_by_label.items()):
         if not step_map:
@@ -411,7 +464,13 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
 
         color = COLORS[idx % len(COLORS)]
         marker = MARKERS[idx % len(MARKERS)]
-        ax.plot(x_values, values, marker=marker, linewidth=2, markersize=7, color=color, label=label)
+        label_has_paired = label in paired_labels_with_data
+        primary_label = (
+            f"{label} ({primary_display_name})"
+            if apply_primary_suffix and label_has_paired
+            else label
+        )
+        ax.plot(x_values, values, marker=marker, linewidth=2, markersize=7, color=color, label=primary_label)
         plotted = True
 
     if paired_series_by_label:
@@ -447,6 +506,9 @@ def _plot_series(series_by_label: Dict[str, Dict[int, float]],
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label if not paired_plotted or not paired_y_label else f"{y_label} / {paired_y_label}")
     ax.set_title(title)
+
+    if y_log:
+        ax.set_yscale("log")
 
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -507,7 +569,10 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
         user_levels = None
 
     if metric_names is None:
-        metric_names = list(METRIC_REGISTRY)
+        metric_names = [
+            name for name, spec in METRIC_REGISTRY.items()
+            if not spec.get("paired_only", False)
+        ]
 
     unknown_metrics = [metric_name for metric_name in metric_names if metric_name not in METRIC_REGISTRY]
     if unknown_metrics:
@@ -554,6 +619,8 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
         metric_dir = output_root / metric_name
         per_layer_dir = metric_dir / "per_layer"
         per_block_dir = metric_dir / "per_block"
+
+        metric_plot_kwargs = {**plot_kwargs, "y_log": metric_spec.get("y_log", False)}
 
         experiment_series = {
             label: _extract_metric_series(experiment, metric_name)
@@ -604,7 +671,8 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                     paired_series_by_label=paired_series_by_label,
                     paired_y_label=metric_spec.get("paired_y_label"),
                     paired_display_name=metric_spec.get("paired_display_name"),
-                    **plot_kwargs,
+                    primary_display_name=metric_spec.get("primary_display_name"),
+                    **metric_plot_kwargs,
                 ):
                     saved_paths.append(str(output_path))
 
@@ -639,7 +707,8 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                     paired_series_by_label=paired_series_by_label,
                     paired_y_label=metric_spec.get("paired_y_label"),
                     paired_display_name=metric_spec.get("paired_display_name"),
-                    **plot_kwargs,
+                    primary_display_name=metric_spec.get("primary_display_name"),
+                    **metric_plot_kwargs,
                 ):
                     saved_paths.append(str(output_path))
 
@@ -667,7 +736,8 @@ def plot_metrics_vs_step(experiment_dirs: Sequence[str],
                 paired_series_by_label=paired_global_series_by_label,
                 paired_y_label=metric_spec.get("paired_y_label"),
                 paired_display_name=metric_spec.get("paired_display_name"),
-                **plot_kwargs,
+                primary_display_name=metric_spec.get("primary_display_name"),
+                **metric_plot_kwargs,
             ):
                 saved_paths.append(str(global_output_path))
 

@@ -119,9 +119,10 @@ python3 -m visualize.metrics_plotter path/to/exp_A path/to/exp_B
 | `modified_condition_number` | top-10% 均值 / bottom-10% 均值 | geometric mean |
 | `quantile_condition_number` | q90 / q10 | geometric mean |
 | `svd_entropy` | 归一化 SVD 熵，范围 [0, 1] | mean |
-| `weight_norm` | 权重范数（仅 per_layer） | mean |
-| `max_singular_value` | 最大奇异值（PC 后） | mean |
-| `original_max_singular_value` | 最大奇异值（PC 前） | mean |
+| `max_singular_value` | 最大奇异值（PC block 上自动叠加 pre-PC 虚线） | mean |
+| `min_singular_value` | 最小奇异值（PC block 上自动叠加 pre-PC 虚线，y 轴 log scale） | mean |
+
+`max_singular_value` / `min_singular_value` 会自动在 PC 启用的 block 上叠加 pre-PC 虚线作为参考；不启用 PC 的实验只画一条线。`min_singular_value` 默认使用 log scale 的 y 轴，便于观察接近 0 的部分。
 
 ### 绘图粒度 (`--plot-levels`)
 
