@@ -16,6 +16,70 @@ export LD_LIBRARY_PATH=/usr/lib/python3.10/site-packages/nvidia/cudnn/lib:/usr/l
 ```
 for setup.
 
+---
+
+## svd_analyzer — 从 ckpt 生成 SV JSON
+
+`svd_analyzer.py` 是 SVD 计算的入口（被 `train.py` 在 `--visualize.enable` 模式下调用）。它会：加载某些 step 的 ckpt 权重、在指定的 val batch 上跑一次 forward 用于校验 ckpt 是否被正确加载（打印 val loss）、对每个 weight matrix 做 SVD，并写 `singular_values_step_{step}.json` 到输出目录。
+
+### 给定实验名后的查找流程
+
+实验名形如 `wsm10010000_PC_ADAMW_1B_baseline`（== `metrics.wandb_comment`）。
+
+1. **找 ckpt 文件夹**。路径由 `train.py` 的拼接规则决定：
+   ```
+   {checkpoint.folder}/{model.name}_{model.flavor}/{optimizer.name}/{wandb_comment}/step-{N}/
+   ```
+   绝大多数 1B run 的 `checkpoint.folder` 是 `/data/zrs/sunruoyu-folder/checkpoints/llama2_pc_layer_cosine`，所以本例即：
+   ```
+   /data/zrs/sunruoyu-folder/checkpoints/llama2_pc_layer_cosine/llama2_1B/AdamW/wsm10010000_PC_ADAMW_1B_baseline/
+   ```
+   `ls` 这个目录看 `step-*` 子目录就知道实际存了哪些 step（注意保存频率由 `checkpoint.interval` 决定，不一定每 1k 都有）。
+
+2. **找当时的 config toml**。和 ckpt 平级存有当时训练用的 toml：
+   ```
+   /data/zrs/sunruoyu-folder/checkpoints/llama2_pc_layer_cosine/configs/{wandb_comment}/*.toml
+   ```
+   例如 `configs/wsm10010000_PC_ADAMW_1B_baseline/adamw_10010000.toml`。**必须用这个 toml**（而非 `train_configs/` 里的当前版本），否则模型架构 / PC 设置可能和 ckpt 不匹配。
+
+3. **选择要做 SVD 的 step 列表**。SVD 比较贵，通常不每个 ckpt 都做。把目标 step 写成逗号分隔传给 `--visualize.step`；缺失的 step 会被 warn 跳过。`-1` 表示全部可用 step。
+
+### 跑脚本
+
+直接复用 `train_configs/llama_scripts/visualize_adamw_82.sh` 的模板，把 `CONFIG_FILE` 和 `STEPS` 改成目标实验的值即可。最小命令示例：
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh && conda activate pc
+cd /data/zrs/sunruoyu-folder/PC-Layer-torchtitan-0427-split
+export USE_LIBUV=1 CC=gcc
+export LD_LIBRARY_PATH=/usr/lib/python3.10/site-packages/nvidia/cudnn/lib:/usr/lib/python3.10/site-packages/nvidia/cublas/lib:$LD_LIBRARY_PATH
+
+CONFIG_FILE=/data/zrs/sunruoyu-folder/checkpoints/llama2_pc_layer_cosine/configs/wsm10010000_PC_ADAMW_1B_baseline/adamw_10010000.toml
+STEPS="1,4000,8000,12000,16000,20000,24000,28000,32000,36000,40000,44000,48000,52000,56000,60000,61100"
+
+torchrun --nproc_per_node=1 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+    --local-ranks-filter 0 --role rank --tee 3 \
+    train.py --job.config_file ${CONFIG_FILE} \
+        --visualize.enable \
+        --visualize.step "${STEPS}"
+```
+
+### 输出位置
+
+JSON 写到 cwd 下的：
+```
+visualization_output/{model.name}_{model.flavor}_{optimizer.name}_{wandb_comment}/singular_values_step_{N}.json
+```
+即本例的 `visualization_output/llama2_1B_AdamW_wsm10010000_PC_ADAMW_1B_baseline/`。
+
+### 提示
+
+- **校验**：每个 step 在 SVD 前会跑 5 个 val batch，打印 `[Checkpoint Verification] Step N - Val loss: ...`。如果某一步明显偏离训练曲线，说明 ckpt 没正确加载，需检查 config 是否和当时一致。
+- **崩溃恢复**：偶发 CUDA NVML 错误会让 run 中途挂掉。已写入的 JSON 不丢，直接把剩下的 step 重新传给 `--visualize.step` 续跑即可。
+- **采样建议**：步频太密的 step 列表收益有限。一般 1B 这种 ~61k 步的 run，每 4k–5k 一个采样点足够画 metrics_plotter 的趋势曲线；记得首末两步（如 `1` 和 `61100`）单独加上。
+
+---
+
 ## plotter — 奇异值直方图
 
 对单个 step 的 JSON 文件，按权重类型（wq, wk, ...）和层号绘制奇异值分布直方图。
@@ -118,11 +182,12 @@ python3 -m visualize.metrics_plotter path/to/exp_A path/to/exp_B
 |--------|------|-------------|
 | `modified_condition_number` | top-10% 均值 / bottom-10% 均值 | geometric mean |
 | `quantile_condition_number` | q90 / q10 | geometric mean |
+| `condition_number` | max sv / min sv（PC block 上自动叠加 pre-PC 虚线） | geometric mean |
 | `svd_entropy` | 归一化 SVD 熵，范围 [0, 1] | mean |
 | `max_singular_value` | 最大奇异值（PC block 上自动叠加 pre-PC 虚线） | mean |
 | `min_singular_value` | 最小奇异值（PC block 上自动叠加 pre-PC 虚线，y 轴 log scale） | mean |
 
-`max_singular_value` / `min_singular_value` 会自动在 PC 启用的 block 上叠加 pre-PC 虚线作为参考；不启用 PC 的实验只画一条线。`min_singular_value` 默认使用 log scale 的 y 轴，便于观察接近 0 的部分。
+`max_singular_value` / `min_singular_value` / `condition_number` 会自动在 PC 启用的 block 上叠加 pre-PC 虚线作为参考；不启用 PC 的实验只画一条线。`min_singular_value` 默认使用 log scale 的 y 轴。
 
 ### 绘图粒度 (`--plot-levels`)
 
